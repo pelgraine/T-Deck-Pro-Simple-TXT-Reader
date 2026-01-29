@@ -141,8 +141,8 @@ void setup() {
     initSD();
     initKeyboard();
     
-    // Show splash screen
-    showSplashScreen();
+    // Skip splash screen for now - focus on fixing navigation
+    // showSplashScreen();
     
     listTextFiles();
     preIndexFiles();  // Pre-index files for fast opening
@@ -244,23 +244,9 @@ void showSplashScreen() {
     
     delay(1000);
     Serial.println("Splash screen complete");
-    
-    // Reinitialize for next screen
-    display.init(115200, false, 2, false);
-    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
-    display.setRotation(0);
 }
 
 void showIndexingScreen(const String& filename) {
-    // Deselect SD card and reconfigure SPI for display
-    digitalWrite(SD_CS, HIGH);
-    delay(1);
-    
-    // Reinitialize display to force fresh buffer
-    display.init(115200, false, 2, false);
-    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
-    display.setRotation(0);
-    
     display.setFullWindow();
     display.firstPage();
     do {
@@ -620,15 +606,6 @@ void preIndexFiles() {
 void displayFileList() {
     Serial.printf("Displaying file list, selectedFileIndex=%d\n", selectedFileIndex);
     
-    // Deselect SD card and reconfigure SPI for display
-    digitalWrite(SD_CS, HIGH);
-    delay(1);
-    
-    // Reinitialize display to force fresh buffer
-    display.init(115200, false, 2, false);  // false = don't do initial update
-    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
-    display.setRotation(0);
-    
     display.setFullWindow();
     display.firstPage();
     do {
@@ -721,14 +698,6 @@ void openBook(const String& filename) {
     
     if (!reader.file) {
         Serial.println("Failed to open file!");
-        
-        // Deselect SD card and reconfigure SPI for display
-        digitalWrite(SD_CS, HIGH);
-        delay(1);
-        display.init(115200, false, 2, false);
-        display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
-        display.setRotation(0);
-        
         display.setFullWindow();
         display.firstPage();
         do {
@@ -864,15 +833,6 @@ void displayPage() {
     buffer[bufLen] = '\0';
     
     Serial.printf("displayPage: read %d chars\n", bufLen);
-    
-    // Deselect SD card and reconfigure SPI for display
-    digitalWrite(SD_CS, HIGH);
-    delay(1);
-    
-    // Reinitialize display to force fresh buffer
-    display.init(115200, false, 2, false);  // false = don't do initial update
-    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
-    display.setRotation(0);
     
     display.setFullWindow();
     display.firstPage();
