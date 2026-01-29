@@ -10,7 +10,7 @@
 // ============================================================================
 
 // Power
-#define PWR_EN 40
+#define PWR_EN 10  // Peripheral power - powers display, keyboard, sensors
 
 // E-Paper Display (GDEQ031T10)
 #define EPD_SCK  36
@@ -18,7 +18,7 @@
 #define EPD_DC   35
 #define EPD_CS   34
 #define EPD_BUSY 37
-#define EPD_RST  -1  // No hardware reset
+#define EPD_RST  16  // Hardware reset pin - CRITICAL for display to work!
 
 // SD Card - shares SPI bus with display and LoRa
 #define SD_CS   48
@@ -53,6 +53,10 @@
 // DISPLAY SETUP
 // ============================================================================
 
+// E-ink and LoRa SHARE the same SPI bus (SCK=36, MOSI=33)
+// They MUST use the same SPI peripheral (HSPI) to avoid GPIO conflicts
+SPIClass displaySpi(HSPI);
+
 // Using GxEPD2_BW for black & white e-paper
 // GDEQ031T10 is a 320x240 e-paper display
 GxEPD2_BW<GxEPD2_310_GDEQ031T10, GxEPD2_310_GDEQ031T10::HEIGHT> display(
@@ -71,7 +75,7 @@ struct Settings {
     uint8_t textSize;
     uint8_t linesPerPage;
     uint8_t charsPerLine;
-} settings = {2, 15, 19};  // Size 2 font, ~15 lines, ~19 chars per line
+} settings = {1, 25, 38};  // Size 1 font, ~25 lines, ~38 chars per line
 
 struct ReaderState {
     String currentFile;
@@ -134,12 +138,11 @@ void setup() {
     
     initHardware();
     initDisplay();
-    
-    // Show splash screen while loading
-    showSplashScreen();
-    
     initSD();
     initKeyboard();
+    
+    // Show splash screen
+    showSplashScreen();
     
     listTextFiles();
     preIndexFiles();  // Pre-index files for fast opening
@@ -177,20 +180,36 @@ void initHardware() {
     digitalWrite(PWR_EN, HIGH);
     delay(200);
     
+    // Initialize E-Ink reset pin BEFORE display.begin() - CRITICAL!
+    // This is from MeshCore's approach
+    pinMode(EPD_RST, OUTPUT);
+    digitalWrite(EPD_RST, HIGH);
+    delay(10);
+    
     Serial.println("✓ Power enabled");
 }
 
 void initDisplay() {
     Serial.println("Initializing e-paper display...");
     
-    // Initialize SPI bus (shared by display, SD card, and LoRa)
-    SPI.begin(EPD_SCK, 47, EPD_MOSI);  // SCK=36, MISO=47, MOSI=33
+    // Initialize HSPI with shared pins
+    displaySpi.begin(EPD_SCK, 47, EPD_MOSI, EPD_CS);
+    
+    // Tell GxEPD2 to use our SPI instance
+    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
     
     // Initialize display
     display.init(115200, true, 2, false);
-    display.setRotation(0);  // Portrait mode
+    display.setRotation(0);
     display.setTextColor(GxEPD_BLACK);
-    display.setTextSize(2);
+    display.setTextSize(1);
+    
+    // Initial clear with full window
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+    } while (display.nextPage());
     
     Serial.println("✓ Display initialized");
 }
@@ -202,70 +221,61 @@ void showSplashScreen() {
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
-        
-        // Draw a simple book icon (rectangle with lines)
-        int iconX = (SCREEN_WIDTH - 60) / 2;
-        int iconY = 60;
-        // Book outline
-        display.drawRect(iconX, iconY, 60, 80, GxEPD_BLACK);
-        display.drawRect(iconX + 2, iconY + 2, 56, 76, GxEPD_BLACK);
-        // Spine
-        display.fillRect(iconX + 28, iconY, 4, 80, GxEPD_BLACK);
-        // Page lines (left side)
-        for (int i = 0; i < 5; i++) {
-            display.drawFastHLine(iconX + 8, iconY + 15 + (i * 12), 16, GxEPD_BLACK);
-        }
-        // Page lines (right side)
-        for (int i = 0; i < 5; i++) {
-            display.drawFastHLine(iconX + 36, iconY + 15 + (i * 12), 16, GxEPD_BLACK);
-        }
-        
-        // Title
-        display.setTextSize(2);
         display.setTextColor(GxEPD_BLACK);
         
-        // Center "TextReader"
-        display.setCursor(42, 160);
+        // Title - centered
+        display.setTextSize(2);
+        display.setCursor(60, 130);
         display.println("TextReader");
         
-        // Version and date
+        // Version - centered
         display.setTextSize(1);
-        display.setCursor(75, 190);
+        display.setCursor(96, 155);
         display.printf("v%s", VERSION);
         
-        display.setCursor(75, 205);
+        // Build date - centered
+        display.setCursor(90, 170);
         display.print(BUILD_DATE);
         
-        // Loading message
-        display.setCursor(70, 250);
+        // Loading message - centered
+        display.setCursor(85, 210);
         display.print("Loading...");
-        
     } while (display.nextPage());
     
-    // Wait for e-ink to physically complete the refresh
-    display.hibernate();
-    delay(2000);  // Show splash for 2 seconds
+    delay(1000);
     Serial.println("Splash screen complete");
+    
+    // Reinitialize for next screen
+    display.init(115200, false, 2, false);
+    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
+    display.setRotation(0);
 }
 
 void showIndexingScreen(const String& filename) {
+    // Deselect SD card and reconfigure SPI for display
+    digitalWrite(SD_CS, HIGH);
+    delay(1);
+    
+    // Reinitialize display to force fresh buffer
+    display.init(115200, false, 2, false);
+    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
+    display.setRotation(0);
+    
     display.setFullWindow();
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
         display.setTextColor(GxEPD_BLACK);
         
-        // Title
         display.setTextSize(2);
         display.setCursor(20, 40);
         display.println("Indexing");
         display.setCursor(20, 65);
         display.println("Pages...");
         
-        // Word-wrapped filename
         display.setTextSize(1);
         int y = 110;
-        int maxChars = 36;  // Characters per line at size 1
+        int maxChars = 36;
         String remaining = filename;
         
         while (remaining.length() > 0 && y < 200) {
@@ -274,7 +284,6 @@ void showIndexingScreen(const String& filename) {
                 line = remaining;
                 remaining = "";
             } else {
-                // Find last space within limit
                 int breakPoint = maxChars;
                 for (int i = maxChars; i > 0; i--) {
                     if (remaining[i] == ' ' || remaining[i] == '-' || remaining[i] == '_') {
@@ -291,27 +300,20 @@ void showIndexingScreen(const String& filename) {
             y += 12;
         }
         
-        // Please wait message
         display.setCursor(20, 230);
         display.println("Please wait.");
         display.setCursor(20, 245);
         display.println("Loading shortly...");
-        
     } while (display.nextPage());
-    
-    display.hibernate();
-    delay(100);
 }
 
 void initSD() {
     Serial.println("Initializing SD card...");
     
-    // SD card shares SPI bus with display (already initialized)
-    // Just need to set CS pin and begin SD
     pinMode(SD_CS, OUTPUT);
-    digitalWrite(SD_CS, HIGH);  // Deselect SD initially
+    digitalWrite(SD_CS, HIGH);
     
-    if (!SD.begin(SD_CS, SPI, 4000000)) {  // Use default SPI, 4MHz
+    if (!SD.begin(SD_CS, displaySpi, 4000000)) {
         Serial.println("✗ SD Card failed!");
         
         display.setFullWindow();
@@ -618,73 +620,79 @@ void preIndexFiles() {
 void displayFileList() {
     Serial.printf("Displaying file list, selectedFileIndex=%d\n", selectedFileIndex);
     
+    // Deselect SD card and reconfigure SPI for display
+    digitalWrite(SD_CS, HIGH);
+    delay(1);
+    
+    // Reinitialize display to force fresh buffer
+    display.init(115200, false, 2, false);  // false = don't do initial update
+    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
+    display.setRotation(0);
+    
     display.setFullWindow();
     display.firstPage();
-    
     do {
         display.fillScreen(GxEPD_WHITE);
         display.setTextColor(GxEPD_BLACK);
-        display.setTextSize(2);
+        display.setTextSize(1);
         
+        // Title
         display.setCursor(10, 5);
+        display.setTextSize(2);
         display.println("TEXT FILES");
+        display.setTextSize(1);
         display.drawFastHLine(0, 25, SCREEN_WIDTH, GxEPD_BLACK);
         
         if (fileList.size() == 0) {
-            display.setCursor(10, 40);
-            display.setTextSize(1);
+            display.setCursor(10, 35);
             display.println("No .txt files found");
             display.println();
             display.println("Add files to SD card");
             display.println("and reset device");
         } else {
-            // Show files with selection indicator
-            int maxVisible = 8;
-            int startIdx = max(0, min(selectedFileIndex - 3, (int)fileList.size() - maxVisible));
+            int maxVisible = 12;
+            int startIdx = max(0, min(selectedFileIndex - 5, (int)fileList.size() - maxVisible));
             int endIdx = min((int)fileList.size(), startIdx + maxVisible);
             
-            int y = 35;
+            int lineHeight = 18;
+            int y = 32;
+            
+            Serial.printf("  Drawing files %d to %d, selected=%d\n", startIdx, endIdx-1, selectedFileIndex);
+            
             for (int i = startIdx; i < endIdx; i++) {
-                display.setCursor(5, y);
-                display.setTextSize(2);
+                bool isSelected = (i == selectedFileIndex);
                 
-                if (i == selectedFileIndex) {
-                    // Highlighted row - white text on black background
-                    display.fillRect(0, y - 2, SCREEN_WIDTH, 24, GxEPD_BLACK);
+                if (isSelected) {
+                    Serial.printf("  -> Drawing SELECTED item %d at y=%d\n", i, y);
+                    display.fillRect(0, y - 2, SCREEN_WIDTH, lineHeight, GxEPD_BLACK);
                     display.setTextColor(GxEPD_WHITE, GxEPD_BLACK);
-                    display.print("> ");
                 } else {
-                    // Normal row - black text on white background
                     display.setTextColor(GxEPD_BLACK, GxEPD_WHITE);
-                    display.print("  ");
                 }
                 
-                // Truncate filename if too long
+                display.setCursor(4, y);
+                display.print(isSelected ? "> " : "  ");
+                
                 String name = fileList[i];
-                if (name.length() > 22) {
-                    name = name.substring(0, 19) + "...";
+                if (name.length() > 36) {
+                    name = name.substring(0, 33) + "...";
                 }
                 display.println(name);
                 
-                y += 24;
+                y += lineHeight;
             }
             
-            // Reset text color for status area
             display.setTextColor(GxEPD_BLACK, GxEPD_WHITE);
             
-            // File count
-            display.setTextSize(1);
-            display.setCursor(5, SCREEN_HEIGHT - 25);
+            display.setCursor(5, SCREEN_HEIGHT - 22);
             display.printf("%d/%d files", selectedFileIndex + 1, fileList.size());
             
-            // Navigation hint
-            display.drawFastHLine(0, SCREEN_HEIGHT - 14, SCREEN_WIDTH, GxEPD_BLACK);
-            display.setCursor(5, SCREEN_HEIGHT - 10);
-            display.print("ENTER=Open W/S=Nav");
+            display.drawFastHLine(0, SCREEN_HEIGHT - 12, SCREEN_WIDTH, GxEPD_BLACK);
+            display.setCursor(5, SCREEN_HEIGHT - 8);
+            display.print("ENTER=Open  W/S=Navigate");
         }
     } while (display.nextPage());
     
-    display.hibernate();  // Ensure display refresh completes
     Serial.println("File list display complete");
 }
 
@@ -713,6 +721,14 @@ void openBook(const String& filename) {
     
     if (!reader.file) {
         Serial.println("Failed to open file!");
+        
+        // Deselect SD card and reconfigure SPI for display
+        digitalWrite(SD_CS, HIGH);
+        delay(1);
+        display.init(115200, false, 2, false);
+        display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
+        display.setRotation(0);
+        
         display.setFullWindow();
         display.firstPage();
         do {
@@ -822,21 +838,19 @@ void displayPage() {
         return;
     }
     
-    // Display constants
-    const int STATUS_BAR_HEIGHT = 18;
+    const int STATUS_BAR_HEIGHT = 14;
     const int TEXT_AREA_HEIGHT = SCREEN_HEIGHT - STATUS_BAR_HEIGHT;
-    const int LINE_HEIGHT = 20;
+    const int LINE_HEIGHT = 12;
     const int MAX_LINES = TEXT_AREA_HEIGHT / LINE_HEIGHT;
-    const int CHARS_PER_LINE = 19;
+    const int CHARS_PER_LINE = 38;
     
-    // Seek to page start
     long pagePos = reader.pagePositions[reader.currentPage];
     reader.file.seek(pagePos);
     
     Serial.printf("displayPage: page %d, pos %ld\n", reader.currentPage + 1, pagePos);
     
-    // Read page content into a simple char buffer (more memory efficient than String)
-    const int BUF_SIZE = 800;  // Enough for ~15 lines of ~50 chars
+    // Read page content into buffer BEFORE display operations
+    const int BUF_SIZE = 1200;
     char buffer[BUF_SIZE];
     int bufLen = 0;
     
@@ -845,45 +859,49 @@ void displayPage() {
         if (c >= 32 || c == '\n' || c == '\r') {
             buffer[bufLen++] = c;
         }
-        // Stop after reading enough for one page
         if (bufLen > MAX_LINES * CHARS_PER_LINE * 2) break;
     }
     buffer[bufLen] = '\0';
     
     Serial.printf("displayPage: read %d chars\n", bufLen);
     
+    // Deselect SD card and reconfigure SPI for display
+    digitalWrite(SD_CS, HIGH);
+    delay(1);
+    
+    // Reinitialize display to force fresh buffer
+    display.init(115200, false, 2, false);  // false = don't do initial update
+    display.epd2.selectSPI(displaySpi, SPISettings(4000000, MSBFIRST, SPI_MODE0));
+    display.setRotation(0);
+    
     display.setFullWindow();
     display.firstPage();
-    
     do {
         display.fillScreen(GxEPD_WHITE);
         display.setTextColor(GxEPD_BLACK, GxEPD_WHITE);
-        display.setTextSize(2);
+        display.setTextSize(1);
         
-        int y = 4;
+        int y = 2;
         int lineCount = 0;
         int lineStart = 0;
         int lastSpace = -1;
         int charOnLine = 0;
         
         for (int i = 0; i <= bufLen && lineCount < MAX_LINES; i++) {
-            char c = (i < bufLen) ? buffer[i] : '\n';  // Force final line output
+            char c = (i < bufLen) ? buffer[i] : '\n';
             
             if (c == ' ') {
                 lastSpace = i;
             }
             
             if (c == '\n' || c == '\r' || charOnLine >= CHARS_PER_LINE) {
-                // End of line - output it
                 int lineEnd = i;
                 
-                // If we hit the char limit and there was a space, break at the space
                 if (charOnLine >= CHARS_PER_LINE && lastSpace > lineStart) {
                     lineEnd = lastSpace;
-                    i = lastSpace;  // Continue from after the space
+                    i = lastSpace;
                 }
                 
-                // Output the line
                 display.setCursor(2, y);
                 for (int j = lineStart; j < lineEnd && j < bufLen; j++) {
                     char ch = buffer[j];
@@ -895,7 +913,6 @@ void displayPage() {
                 y += LINE_HEIGHT;
                 lineCount++;
                 
-                // Skip whitespace at start of next line
                 while (i + 1 < bufLen && (buffer[i + 1] == ' ' || buffer[i + 1] == '\r')) {
                     i++;
                 }
@@ -910,7 +927,7 @@ void displayPage() {
         
         // Status bar
         display.setTextSize(1);
-        int statusY = SCREEN_HEIGHT - STATUS_BAR_HEIGHT + 4;
+        int statusY = SCREEN_HEIGHT - STATUS_BAR_HEIGHT + 3;
         display.drawFastHLine(0, SCREEN_HEIGHT - STATUS_BAR_HEIGHT, SCREEN_WIDTH, GxEPD_BLACK);
         
         display.setCursor(4, statusY);
@@ -918,18 +935,17 @@ void displayPage() {
         
         int percent = reader.totalPages > 1 ? 
             (reader.currentPage * 100) / (reader.totalPages - 1) : 100;
-        display.setCursor(60, statusY);
+        display.setCursor(70, statusY);
         display.printf("%d%%", percent);
         
-        display.setCursor(95, statusY);
+        display.setCursor(100, statusY);
         display.print("W:Prev S:Next");
         
-        display.setCursor(200, statusY);
+        display.setCursor(195, statusY);
         display.print("Q:Exit");
         
     } while (display.nextPage());
     
-    display.hibernate();  // Ensure display refresh completes
     Serial.printf("Displayed page %d/%d\n", reader.currentPage + 1, reader.totalPages);
 }
 
@@ -1112,7 +1128,9 @@ void handleKeyPress(uint8_t key) {
             case 'q':
             case 'Q':
             case 0x1B:     // Escape
+                Serial.println("  EXIT: closing book and returning to file list");
                 closeBook();
+                delay(50);  // Small delay before redrawing
                 displayFileList();
                 break;
         }
