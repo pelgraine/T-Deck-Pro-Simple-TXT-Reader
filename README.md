@@ -1,5 +1,5 @@
 ## T-Deck Pro Simple TXT Reader
-A simple e-book reader firmware for the LilyGo T-Deck Pro v1.1, designed to read plain text (.txt) files from an SD card on the built-in e-paper display.
+A simple e-book reader firmware for the LilyGo T-Deck Pro, designed to read plain text (.txt) files from an SD card on the built-in e-paper display.
 
 ## Features
 
