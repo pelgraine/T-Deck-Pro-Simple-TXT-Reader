@@ -68,8 +68,11 @@ GxEPD2_BW<GxEPD2_310_GDEQ031T10, GxEPD2_310_GDEQ031T10::HEIGHT> display(
 // ============================================================================
 
 // Version info
-#define VERSION "1.0.0"
-#define BUILD_DATE "Jan 2025"
+#define VERSION "1.1.0"
+#define BUILD_DATE "Feb 2025"
+
+// Index file version - increment when format changes
+#define INDEX_VERSION 2
 
 struct Settings {
     uint8_t textSize;
@@ -93,11 +96,16 @@ struct FileCache {
     std::vector<long> pagePositions;  // First N page positions
     unsigned long fileSize;
     bool fullyIndexed;  // True if file has <= PREINDEX_PAGES pages
+    int lastReadPage;   // Resume position - NEW!
 };
 std::vector<FileCache> fileCache;
 
 std::vector<String> fileList;
 int selectedFileIndex = 0;
+
+// Partial refresh tracking
+int lastDisplayedPage = -1;
+int lastDisplayedTotal = -1;
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -112,16 +120,28 @@ void showIndexingScreen(const String& filename);
 void listTextFiles();
 void preIndexFiles();
 bool loadIndexFromSD(const String& filename, FileCache& cache);
-bool saveIndexToSD(const String& filename, const std::vector<long>& pagePositions, unsigned long fileSize);
+bool saveIndexToSD(const String& filename, const std::vector<long>& pagePositions, unsigned long fileSize, bool fullyIndexed, int lastReadPage);
+bool saveReadingPosition(const String& filename, int page);
 String getIndexFilename(const String& txtFilename);
 void displayFileList();
 void openBook(const String& filename);
 void displayPage();
+void displayPageFull();
+void updateStatusBar();
 void nextPage();
 void prevPage();
 void closeBook();
 uint8_t readKeyboard();
 void handleKeyPress(uint8_t key);
+void writeKBReg(uint8_t reg, uint8_t value);
+uint8_t readKBReg(uint8_t reg);
+
+// Word wrap helper
+struct WrapResult {
+    int lineEnd;      // End position for this line
+    int nextStart;    // Start position for next line
+};
+WrapResult findLineBreak(const char* buffer, int bufLen, int lineStart, int maxChars);
 
 // ============================================================================
 // SETUP
@@ -186,7 +206,7 @@ void initHardware() {
     digitalWrite(EPD_RST, HIGH);
     delay(10);
     
-    Serial.println("✓ Power enabled");
+    Serial.println("âœ“ Power enabled");
 }
 
 void initDisplay() {
@@ -211,7 +231,7 @@ void initDisplay() {
         display.fillScreen(GxEPD_WHITE);
     } while (display.nextPage());
     
-    Serial.println("✓ Display initialized");
+    Serial.println("âœ“ Display initialized");
 }
 
 void showSplashScreen() {
@@ -300,7 +320,7 @@ void initSD() {
     digitalWrite(SD_CS, HIGH);
     
     if (!SD.begin(SD_CS, displaySpi, 4000000)) {
-        Serial.println("✗ SD Card failed!");
+        Serial.println("âœ— SD Card failed!");
         
         display.setFullWindow();
         display.firstPage();
@@ -318,7 +338,7 @@ void initSD() {
     }
     
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    Serial.printf("✓ SD Card: %llu MB\n", cardSize);
+    Serial.printf("âœ“ SD Card: %llu MB\n", cardSize);
 }
 
 void writeKBReg(uint8_t reg, uint8_t value) {
@@ -348,7 +368,7 @@ void initKeyboard() {
     uint8_t error = Wire.endTransmission();
     
     if (error != 0) {
-        Serial.printf("✗ Keyboard not found (error: %d)\n", error);
+        Serial.printf("âœ— Keyboard not found (error: %d)\n", error);
         return;
     }
     
@@ -367,6 +387,9 @@ void initKeyboard() {
     // Bit 4: K_LCK_IEN (key lock)
     writeKBReg(TCA8418_REG_CFG, 0x11);  // Enable key event interrupt + INT stays active
     
+    // Set debounce for reliable key detection
+    writeKBReg(TCA8418_REG_DEBOUNCE, 0x03);
+    
     // Clear any pending interrupts by reading the interrupt status
     readKBReg(TCA8418_REG_INT_STAT);
     
@@ -378,7 +401,7 @@ void initKeyboard() {
     // Clear interrupt status again
     writeKBReg(TCA8418_REG_INT_STAT, 0x1F);  // Clear all interrupt flags
     
-    Serial.println("✓ Keyboard initialized");
+    Serial.println("âœ“ Keyboard initialized");
 }
 
 // ============================================================================
@@ -428,7 +451,7 @@ String getIndexFilename(const String& txtFilename) {
     return "/.indexes/" + txtFilename + ".idx";
 }
 
-// Load index from SD card
+// Load index from SD card - Updated for v2 format with lastReadPage
 bool loadIndexFromSD(const String& filename, FileCache& cache) {
     String idxPath = getIndexFilename(filename);
     
@@ -437,14 +460,31 @@ bool loadIndexFromSD(const String& filename, FileCache& cache) {
         return false;  // No index file exists
     }
     
-    // Read header: filesize (4 bytes) + page count (4 bytes) + fully indexed flag (1 byte)
+    // Read header: version (1 byte) + filesize (4 bytes) + page count (4 bytes) + 
+    //              fully indexed flag (1 byte) + lastReadPage (4 bytes)
+    uint8_t indexVersion = 0;
     unsigned long savedFileSize = 0;
     unsigned long pageCount = 0;
     uint8_t fullyIndexed = 0;
+    int lastReadPage = 0;
     
-    idxFile.read((uint8_t*)&savedFileSize, 4);
-    idxFile.read((uint8_t*)&pageCount, 4);
-    idxFile.read(&fullyIndexed, 1);
+    idxFile.read(&indexVersion, 1);
+    
+    // Handle old format (no version byte) - first byte would be part of fileSize
+    if (indexVersion != INDEX_VERSION) {
+        // Old format - seek back and read old way
+        idxFile.seek(0);
+        idxFile.read((uint8_t*)&savedFileSize, 4);
+        idxFile.read((uint8_t*)&pageCount, 4);
+        idxFile.read(&fullyIndexed, 1);
+        lastReadPage = 0;  // No saved position in old format
+    } else {
+        // New v2 format
+        idxFile.read((uint8_t*)&savedFileSize, 4);
+        idxFile.read((uint8_t*)&pageCount, 4);
+        idxFile.read(&fullyIndexed, 1);
+        idxFile.read((uint8_t*)&lastReadPage, 4);
+    }
     
     // Verify file size matches (if file changed, index is invalid)
     String fullPath = "/" + filename;
@@ -467,6 +507,7 @@ bool loadIndexFromSD(const String& filename, FileCache& cache) {
     cache.filename = filename;
     cache.fileSize = savedFileSize;
     cache.fullyIndexed = (fullyIndexed == 1);
+    cache.lastReadPage = lastReadPage;
     cache.pagePositions.clear();
     
     for (unsigned long i = 0; i < pageCount; i++) {
@@ -479,8 +520,8 @@ bool loadIndexFromSD(const String& filename, FileCache& cache) {
     return true;
 }
 
-// Save index to SD card
-bool saveIndexToSD(const String& filename, const std::vector<long>& pagePositions, unsigned long fileSize, bool fullyIndexed) {
+// Save index to SD card - Updated for v2 format with lastReadPage
+bool saveIndexToSD(const String& filename, const std::vector<long>& pagePositions, unsigned long fileSize, bool fullyIndexed, int lastReadPage) {
     // Create indexes folder if it doesn't exist
     if (!SD.exists("/.indexes")) {
         SD.mkdir("/.indexes");
@@ -499,13 +540,16 @@ bool saveIndexToSD(const String& filename, const std::vector<long>& pagePosition
         return false;
     }
     
-    // Write header
+    // Write header - v2 format
+    uint8_t version = INDEX_VERSION;
     unsigned long pageCount = pagePositions.size();
     uint8_t fullyFlag = fullyIndexed ? 1 : 0;
     
+    idxFile.write(&version, 1);
     idxFile.write((uint8_t*)&fileSize, 4);
     idxFile.write((uint8_t*)&pageCount, 4);
     idxFile.write(&fullyFlag, 1);
+    idxFile.write((uint8_t*)&lastReadPage, 4);
     
     // Write page positions
     for (unsigned long i = 0; i < pageCount; i++) {
@@ -514,6 +558,46 @@ bool saveIndexToSD(const String& filename, const std::vector<long>& pagePosition
     }
     
     idxFile.close();
+    return true;
+}
+
+// Save only the reading position without rewriting entire index
+bool saveReadingPosition(const String& filename, int page) {
+    String idxPath = getIndexFilename(filename);
+    
+    // Open for read+write
+    File idxFile = SD.open(idxPath.c_str(), "r+");
+    if (!idxFile) {
+        Serial.printf("  Cannot update position - no index file for %s\n", filename.c_str());
+        return false;
+    }
+    
+    // Check version
+    uint8_t version = 0;
+    idxFile.read(&version, 1);
+    
+    if (version != INDEX_VERSION) {
+        // Old format - need to do full rewrite
+        idxFile.close();
+        
+        // Find cache entry and do full save
+        for (int i = 0; i < fileCache.size(); i++) {
+            if (fileCache[i].filename == filename) {
+                fileCache[i].lastReadPage = page;
+                return saveIndexToSD(filename, fileCache[i].pagePositions, 
+                                    fileCache[i].fileSize, fileCache[i].fullyIndexed, page);
+            }
+        }
+        return false;
+    }
+    
+    // v2 format - seek to lastReadPage position and update
+    // Header: version(1) + fileSize(4) + pageCount(4) + fullyIndexed(1) + lastReadPage(4)
+    idxFile.seek(1 + 4 + 4 + 1);  // Seek to lastReadPage offset
+    idxFile.write((uint8_t*)&page, 4);
+    idxFile.close();
+    
+    Serial.printf("  Saved reading position: page %d for %s\n", page + 1, filename.c_str());
     return true;
 }
 
@@ -526,10 +610,11 @@ void preIndexFiles() {
         
         // Try to load existing index from SD
         if (loadIndexFromSD(fileList[f], cache)) {
-            Serial.printf("  %s: loaded %d pages from cache%s\n", 
+            Serial.printf("  %s: loaded %d pages from cache%s (resume: pg %d)\n", 
                           fileList[f].c_str(), 
                           cache.pagePositions.size(),
-                          cache.fullyIndexed ? " (complete)" : "");
+                          cache.fullyIndexed ? " (complete)" : "",
+                          cache.lastReadPage + 1);
             fileCache.push_back(cache);
             continue;
         }
@@ -548,6 +633,7 @@ void preIndexFiles() {
         cache.filename = fileList[f];
         cache.fileSize = file.size();
         cache.fullyIndexed = false;
+        cache.lastReadPage = 0;  // Start at beginning for new files
         cache.pagePositions.push_back(0);  // First page always at 0
         
         int lineCount = 0;
@@ -591,7 +677,7 @@ void preIndexFiles() {
         file.close();
         
         // Save the partial index to SD for next time
-        saveIndexToSD(cache.filename, cache.pagePositions, cache.fileSize, cache.fullyIndexed);
+        saveIndexToSD(cache.filename, cache.pagePositions, cache.fileSize, cache.fullyIndexed, 0);
         
         fileCache.push_back(cache);
         
@@ -651,10 +737,22 @@ void displayFileList() {
                 display.print(isSelected ? "> " : "  ");
                 
                 String name = fileList[i];
-                if (name.length() > 36) {
-                    name = name.substring(0, 33) + "...";
+                
+                // Show resume indicator if there's a saved position
+                String suffix = "";
+                for (int j = 0; j < fileCache.size(); j++) {
+                    if (fileCache[j].filename == name && fileCache[j].lastReadPage > 0) {
+                        suffix = " *";  // Asterisk indicates saved position
+                        break;
+                    }
                 }
-                display.println(name);
+                
+                int maxLen = 34 - suffix.length();
+                if (name.length() > maxLen) {
+                    name = name.substring(0, maxLen - 3) + "...";
+                }
+                display.print(name);
+                display.println(suffix);
                 
                 y += lineHeight;
             }
@@ -719,6 +817,10 @@ void openBook(const String& filename) {
     reader.currentPage = 0;
     reader.pagePositions.clear();
     
+    // Reset partial refresh tracking
+    lastDisplayedPage = -1;
+    lastDisplayedTotal = -1;
+    
     // Use cached index if available
     if (cache != nullptr) {
         Serial.printf("Using cached index (%d pages pre-indexed)\n", cache->pagePositions.size());
@@ -728,11 +830,17 @@ void openBook(const String& filename) {
             reader.pagePositions.push_back(cache->pagePositions[i]);
         }
         
+        // Restore reading position!
+        if (cache->lastReadPage > 0 && cache->lastReadPage < cache->pagePositions.size()) {
+            reader.currentPage = cache->lastReadPage;
+            Serial.printf("Resuming at page %d\n", reader.currentPage + 1);
+        }
+        
         // If fully indexed, we're done
         if (cache->fullyIndexed) {
             reader.totalPages = reader.pagePositions.size();
             Serial.printf("File fully pre-indexed: %d pages\n", reader.totalPages);
-            displayPage();
+            displayPageFull();
             return;
         }
         
@@ -793,15 +901,156 @@ void openBook(const String& filename) {
     reader.totalPages = reader.pagePositions.size();
     Serial.printf("Total pages: %d\n", reader.totalPages);
     
-    // Save the complete index to SD for next time
-    if (saveIndexToSD(filename, reader.pagePositions, reader.file.size(), true)) {
+    // Save the complete index to SD for next time (with current position)
+    if (saveIndexToSD(filename, reader.pagePositions, reader.file.size(), true, reader.currentPage)) {
         Serial.println("Full index saved to SD card");
     }
     
-    displayPage();
+    displayPageFull();
 }
 
-void displayPage() {
+// ============================================================================
+// IMPROVED WORD WRAP LOGIC
+// ============================================================================
+
+// Find the best line break point, handling edge cases
+WrapResult findLineBreak(const char* buffer, int bufLen, int lineStart, int maxChars) {
+    WrapResult result;
+    result.lineEnd = lineStart;
+    result.nextStart = lineStart;
+    
+    if (lineStart >= bufLen) {
+        return result;
+    }
+    
+    int charCount = 0;
+    int lastBreakPoint = -1;  // Position of last good break opportunity
+    int lastBreakCharCount = 0;
+    bool inWord = false;
+    
+    for (int i = lineStart; i < bufLen; i++) {
+        char c = buffer[i];
+        
+        // Hard line break - always honor
+        if (c == '\n') {
+            result.lineEnd = i;
+            result.nextStart = i + 1;
+            // Skip \r if present after \n (or before)
+            if (result.nextStart < bufLen && buffer[result.nextStart] == '\r') {
+                result.nextStart++;
+            }
+            return result;
+        }
+        
+        if (c == '\r') {
+            result.lineEnd = i;
+            result.nextStart = i + 1;
+            // Skip \n if present after \r
+            if (result.nextStart < bufLen && buffer[result.nextStart] == '\n') {
+                result.nextStart++;
+            }
+            return result;
+        }
+        
+        // Track printable characters for line width
+        if (c >= 32) {
+            charCount++;
+            
+            // Track word boundaries for smart wrapping
+            if (c == ' ' || c == '\t') {
+                if (inWord) {
+                    // Just finished a word - this is a good break point
+                    lastBreakPoint = i;
+                    lastBreakCharCount = charCount;
+                    inWord = false;
+                }
+            } else if (c == '-') {
+                // Hyphen - can break after it if we're in a word
+                if (inWord) {
+                    lastBreakPoint = i + 1;  // Break AFTER the hyphen
+                    lastBreakCharCount = charCount;
+                }
+            } else {
+                inWord = true;
+            }
+            
+            // Check if we've exceeded line width
+            if (charCount >= maxChars) {
+                if (lastBreakPoint > lineStart) {
+                    // We have a good break point - use it
+                    result.lineEnd = lastBreakPoint;
+                    result.nextStart = lastBreakPoint;
+                    
+                    // Skip whitespace at break point
+                    while (result.nextStart < bufLen && 
+                           (buffer[result.nextStart] == ' ' || buffer[result.nextStart] == '\t')) {
+                        result.nextStart++;
+                    }
+                } else {
+                    // No good break point - force break mid-word
+                    // Back up one character so we don't exceed maxChars
+                    result.lineEnd = i;
+                    result.nextStart = i;
+                }
+                return result;
+            }
+        }
+    }
+    
+    // Reached end of buffer
+    result.lineEnd = bufLen;
+    result.nextStart = bufLen;
+    return result;
+}
+
+// ============================================================================
+// PARTIAL SCREEN REFRESH FOR STATUS BAR
+// ============================================================================
+
+void updateStatusBar() {
+    const int STATUS_BAR_HEIGHT = 14;
+    int statusY = SCREEN_HEIGHT - STATUS_BAR_HEIGHT;
+    
+    // Use partial window for just the status bar area
+    display.setPartialWindow(0, statusY, SCREEN_WIDTH, STATUS_BAR_HEIGHT);
+    display.firstPage();
+    do {
+        // Clear status bar area
+        display.fillRect(0, statusY, SCREEN_WIDTH, STATUS_BAR_HEIGHT, GxEPD_WHITE);
+        
+        display.setTextColor(GxEPD_BLACK, GxEPD_WHITE);
+        display.setTextSize(1);
+        
+        // Separator line
+        display.drawFastHLine(0, statusY, SCREEN_WIDTH, GxEPD_BLACK);
+        
+        int textY = statusY + 3;
+        
+        // Page numbers
+        display.setCursor(4, textY);
+        display.printf("%d/%d", reader.currentPage + 1, reader.totalPages);
+        
+        // Percentage
+        int percent = reader.totalPages > 1 ? 
+            (reader.currentPage * 100) / (reader.totalPages - 1) : 100;
+        display.setCursor(70, textY);
+        display.printf("%d%%", percent);
+        
+        // Controls hint
+        display.setCursor(100, textY);
+        display.print("W:Prev S:Next");
+        
+        display.setCursor(195, textY);
+        display.print("Q:Exit");
+        
+    } while (display.nextPage());
+    
+    lastDisplayedPage = reader.currentPage;
+    lastDisplayedTotal = reader.totalPages;
+}
+
+// Full page display (used for first display or after exiting/entering)
+void displayPageFull() {
     if (!reader.fileOpen || reader.currentPage >= reader.totalPages) {
         Serial.println("Cannot display page - invalid state");
         return;
@@ -816,7 +1065,7 @@ void displayPage() {
     long pagePos = reader.pagePositions[reader.currentPage];
     reader.file.seek(pagePos);
     
-    Serial.printf("displayPage: page %d, pos %ld\n", reader.currentPage + 1, pagePos);
+    Serial.printf("displayPageFull: page %d, pos %ld\n", reader.currentPage + 1, pagePos);
     
     // Read page content into buffer BEFORE display operations
     const int BUF_SIZE = 1200;
@@ -828,11 +1077,12 @@ void displayPage() {
         if (c >= 32 || c == '\n' || c == '\r') {
             buffer[bufLen++] = c;
         }
+        // Stop if we've read enough for a page
         if (bufLen > MAX_LINES * CHARS_PER_LINE * 2) break;
     }
     buffer[bufLen] = '\0';
     
-    Serial.printf("displayPage: read %d chars\n", bufLen);
+    Serial.printf("displayPageFull: read %d chars\n", bufLen);
     
     display.setFullWindow();
     display.firstPage();
@@ -843,46 +1093,28 @@ void displayPage() {
         
         int y = 2;
         int lineCount = 0;
-        int lineStart = 0;
-        int lastSpace = -1;
-        int charOnLine = 0;
+        int pos = 0;
         
-        for (int i = 0; i <= bufLen && lineCount < MAX_LINES; i++) {
-            char c = (i < bufLen) ? buffer[i] : '\n';
+        // Use improved word wrap
+        while (pos < bufLen && lineCount < MAX_LINES) {
+            WrapResult wrap = findLineBreak(buffer, bufLen, pos, CHARS_PER_LINE);
             
-            if (c == ' ') {
-                lastSpace = i;
+            // Draw this line
+            display.setCursor(2, y);
+            for (int j = pos; j < wrap.lineEnd && j < bufLen; j++) {
+                char ch = buffer[j];
+                if (ch >= 32) {  // Only print printable characters
+                    display.print(ch);
+                }
             }
             
-            if (c == '\n' || c == '\r' || charOnLine >= CHARS_PER_LINE) {
-                int lineEnd = i;
-                
-                if (charOnLine >= CHARS_PER_LINE && lastSpace > lineStart) {
-                    lineEnd = lastSpace;
-                    i = lastSpace;
-                }
-                
-                display.setCursor(2, y);
-                for (int j = lineStart; j < lineEnd && j < bufLen; j++) {
-                    char ch = buffer[j];
-                    if (ch >= 32) {
-                        display.print(ch);
-                    }
-                }
-                
-                y += LINE_HEIGHT;
-                lineCount++;
-                
-                while (i + 1 < bufLen && (buffer[i + 1] == ' ' || buffer[i + 1] == '\r')) {
-                    i++;
-                }
-                
-                lineStart = i + 1;
-                lastSpace = -1;
-                charOnLine = 0;
-            } else if (c >= 32) {
-                charOnLine++;
-            }
+            y += LINE_HEIGHT;
+            lineCount++;
+            pos = wrap.nextStart;
+            
+            // Safety check
+            if (wrap.nextStart <= pos && wrap.lineEnd >= bufLen) break;
+            if (pos >= bufLen) break;
         }
         
         // Status bar
@@ -906,7 +1138,17 @@ void displayPage() {
         
     } while (display.nextPage());
     
+    lastDisplayedPage = reader.currentPage;
+    lastDisplayedTotal = reader.totalPages;
+    
     Serial.printf("Displayed page %d/%d\n", reader.currentPage + 1, reader.totalPages);
+}
+
+// Regular page display - uses full refresh since content changes
+void displayPage() {
+    // For e-paper, full refresh is generally better for text content
+    // to avoid ghosting. We use partial refresh only for status bar updates.
+    displayPageFull();
 }
 
 void nextPage() {
@@ -928,6 +1170,18 @@ void prevPage() {
 void closeBook() {
     if (reader.fileOpen) {
         Serial.println("Closing book");
+        
+        // Save reading position before closing!
+        saveReadingPosition(reader.currentFile, reader.currentPage);
+        
+        // Update the cache too
+        for (int i = 0; i < fileCache.size(); i++) {
+            if (fileCache[i].filename == reader.currentFile) {
+                fileCache[i].lastReadPage = reader.currentPage;
+                break;
+            }
+        }
+        
         reader.file.close();
         reader.fileOpen = false;
         reader.pagePositions.clear();
@@ -944,8 +1198,8 @@ void closeBook() {
 
 char getKeyChar(uint8_t keyCode) {
     switch (keyCode) {
-        // Row 1 - QWERTYUIOP (codes go right to left: P=1, O=2, ... W=9, Q=97)
-        case 97: return 'q';
+        // Row 1 - QWERTYUIOP (codes go right to left: P=1, O=2, ... W=9, Q=10)
+        case 10: return 'q';
         case 9:  return 'w';
         case 8:  return 'e';
         case 7:  return 'r';
@@ -956,8 +1210,8 @@ char getKeyChar(uint8_t keyCode) {
         case 2:  return 'o';
         case 1:  return 'p';
         
-        // Row 2 - ASDFGHJKL + Backspace (A=98, S=19, ... L=12, Bksp=11)
-        case 98: return 'a';
+        // Row 2 - ASDFGHJKL + Backspace (A=20, S=19, ... L=12, Bksp=11)
+        case 20: return 'a';
         case 19: return 's';
         case 18: return 'd';
         case 17: return 'f';
@@ -977,7 +1231,7 @@ char getKeyChar(uint8_t keyCode) {
         case 25: return 'b';
         case 24: return 'n';
         case 23: return 'm';
-        case 22: return 0;    // Symbol/volume
+        case 22: return '$';  // $ key (next to M)
         case 21: return '\r'; // Enter
         
         // Row 4 - Shift Mic Space Sym Shift
@@ -1036,7 +1290,6 @@ void handleKeyPress(uint8_t key) {
         // FILE LIST MODE
         switch (key) {
             case 'w':
-            case 'W':
                 if (selectedFileIndex > 0) {
                     selectedFileIndex--;
                     Serial.printf("  Nav UP: selectedFileIndex now %d\n", selectedFileIndex);
@@ -1047,7 +1300,6 @@ void handleKeyPress(uint8_t key) {
                 break;
                 
             case 's':
-            case 'S':
                 if (selectedFileIndex < (int)fileList.size() - 1) {
                     selectedFileIndex++;
                     Serial.printf("  Nav DOWN: selectedFileIndex now %d\n", selectedFileIndex);
@@ -1069,16 +1321,12 @@ void handleKeyPress(uint8_t key) {
         // READING MODE
         switch (key) {
             case 'w':
-            case 'W':
             case 'a':
-            case 'A':
                 prevPage();
                 break;
                 
             case 's':
-            case 'S':
             case 'd':
-            case 'D':
             case ' ':      // Space
             case '\r':     // Enter
             case '\n':     // Line feed
@@ -1086,7 +1334,6 @@ void handleKeyPress(uint8_t key) {
                 break;
                 
             case 'q':
-            case 'Q':
             case 0x1B:     // Escape
                 Serial.println("  EXIT: closing book and returning to file list");
                 closeBook();
