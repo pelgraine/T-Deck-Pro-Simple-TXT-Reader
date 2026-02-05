@@ -45,6 +45,14 @@
 #define TCA8418_REG_GPI_EM2     0x21
 #define TCA8418_REG_GPI_EM3     0x22
 
+// E-Paper Front Light (V1.1 only - edge-lit light guide panel)
+#define EPD_BL 45  // Front light PWM pin (V1.1 moved touch RST to 38 to free this)
+
+// Front light PWM settings (ESP32 LEDC)
+#define BL_LEDC_CHANNEL  0
+#define BL_LEDC_FREQ     5000   // 5kHz PWM
+#define BL_LEDC_RESOLUTION 8    // 8-bit = 0-255
+
 // Display specs - Portrait mode (rotation 0)
 #define SCREEN_WIDTH  240
 #define SCREEN_HEIGHT 320
@@ -68,11 +76,14 @@ GxEPD2_BW<GxEPD2_310_GDEQ031T10, GxEPD2_310_GDEQ031T10::HEIGHT> display(
 // ============================================================================
 
 // Version info
-#define VERSION "0.0.5"
+#define VERSION "0.0.6"
 #define BUILD_DATE "Feb 2026"
 
 // Index file version - increment when format changes
 #define INDEX_VERSION 3
+
+// Books folder on SD card
+#define BOOKS_FOLDER "/books"
 
 struct Settings {
     uint8_t textSize;
@@ -107,6 +118,12 @@ int selectedFileIndex = 0;
 int lastDisplayedPage = -1;
 int lastDisplayedTotal = -1;
 
+// Front light state
+const uint8_t BL_LEVELS[] = {0, 32, 64, 128, 192, 255};  // Off, very dim, dim, medium, bright, max
+const int BL_NUM_LEVELS = sizeof(BL_LEVELS) / sizeof(BL_LEVELS[0]);
+int blLevelIndex = 0;  // Start with light off
+bool frontLightAvailable = false;  // Set true if hardware responds
+
 // ============================================================================
 // FUNCTION DECLARATIONS
 // ============================================================================
@@ -136,6 +153,11 @@ void handleKeyPress(uint8_t key);
 void writeKBReg(uint8_t reg, uint8_t value);
 uint8_t readKBReg(uint8_t reg);
 
+// Front light control
+void initFrontLight();
+void setFrontLight(uint8_t brightness);
+void cycleFrontLight();
+
 // Word wrap helper
 struct WrapResult {
     int lineEnd;      // End position for this line
@@ -158,6 +180,7 @@ void setup() {
     Serial.println("====================================\n");
     
     initHardware();
+    initFrontLight();
     initDisplay();
     initSD();
     initKeyboard();
@@ -205,13 +228,65 @@ void initHardware() {
     pinMode(41, OUTPUT);
     digitalWrite(41, LOW);
     
-    // Initialize E-Ink reset pin BEFORE display.begin() - CRITICAL!
-    // This is from MeshCore's approach
+    // Hardware reset the e-paper display controller
+    // Pulse LOW->HIGH to force a known default state regardless of
+    // how firmware was loaded (Launcher vs PlatformIO direct upload)
     pinMode(EPD_RST, OUTPUT);
     digitalWrite(EPD_RST, HIGH);
     delay(10);
+    digitalWrite(EPD_RST, LOW);
+    delay(20);
+    digitalWrite(EPD_RST, HIGH);
+    delay(100);  // Display controller needs time to settle after reset
     
     Serial.println("Ã¢Å“â€œ Power enabled");
+}
+
+// ============================================================================
+// FRONT LIGHT CONTROL (V1.1 only)
+// ============================================================================
+
+void initFrontLight() {
+    Serial.println("Initializing front light (GPIO 45)...");
+    
+    // Configure LEDC PWM channel
+    ledcSetup(BL_LEDC_CHANNEL, BL_LEDC_FREQ, BL_LEDC_RESOLUTION);
+    ledcAttachPin(EPD_BL, BL_LEDC_CHANNEL);
+    
+    // Start with light off
+    ledcWrite(BL_LEDC_CHANNEL, 0);
+    
+    // Quick test: pulse the light briefly to see if hardware is present
+    Serial.println("  Testing front light - brief pulse...");
+    ledcWrite(BL_LEDC_CHANNEL, 128);
+    delay(300);
+    ledcWrite(BL_LEDC_CHANNEL, 0);
+    
+    frontLightAvailable = true;  // Assume present on V1.1
+    blLevelIndex = 0;  // Start off
+    
+    Serial.println("  Front light initialized (IO45 PWM)");
+    Serial.println("  Use 'L' key to cycle brightness");
+    Serial.println("  If no glow was visible, front light may not be populated on your board");
+}
+
+void setFrontLight(uint8_t brightness) {
+    ledcWrite(BL_LEDC_CHANNEL, brightness);
+    Serial.printf("  Front light: %d/255\n", brightness);
+}
+
+void cycleFrontLight() {
+    blLevelIndex = (blLevelIndex + 1) % BL_NUM_LEVELS;
+    uint8_t brightness = BL_LEVELS[blLevelIndex];
+    setFrontLight(brightness);
+    
+    const char* labels[] = {"OFF", "Very Dim", "Dim", "Medium", "Bright", "Max"};
+    Serial.printf("  Front light: %s (%d/255)\n", labels[blLevelIndex], brightness);
+    
+    // Update just the status bar to show current brightness
+    if (reader.fileOpen) {
+        updateStatusBar();
+    }
 }
 
 void initDisplay() {
@@ -225,7 +300,8 @@ void initDisplay() {
     
     // Initialize display
     display.init(115200, true, 2, false);
-    display.setRotation(0);
+    display.setRotation(2);
+    display.mirror(true);
     display.setTextColor(GxEPD_BLACK);
     display.setTextSize(1);
     
@@ -241,6 +317,9 @@ void initDisplay() {
 
 void showSplashScreen() {
     Serial.println("Showing splash screen...");
+    
+    // Deselect SD card to free SPI bus for display
+    digitalWrite(SD_CS, HIGH);
     
     display.setFullWindow();
     display.firstPage();
@@ -268,10 +347,14 @@ void showSplashScreen() {
     } while (display.nextPage());
     
     delay(1000);
+    display.hibernate();  // Deep sleep forces full re-init on next draw
     Serial.println("Splash screen complete");
 }
 
 void showIndexingScreen(const String& filename) {
+    // Deselect SD card to free SPI bus for display
+    digitalWrite(SD_CS, HIGH);
+    
     display.setFullWindow();
     display.firstPage();
     do {
@@ -344,6 +427,17 @@ void initSD() {
     
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);
     Serial.printf("Ã¢Å“â€œ SD Card: %llu MB\n", cardSize);
+    
+    // Create books folder if it does not exist
+    if (!SD.exists(BOOKS_FOLDER)) {
+        if (SD.mkdir(BOOKS_FOLDER)) {
+            Serial.printf("  Created %s folder\n", BOOKS_FOLDER);
+        } else {
+            Serial.printf("  Failed to create %s folder\n", BOOKS_FOLDER);
+        }
+    } else {
+        Serial.printf("  %s folder exists\n", BOOKS_FOLDER);
+    }
 }
 
 void writeKBReg(uint8_t reg, uint8_t value) {
@@ -418,9 +512,9 @@ void listTextFiles() {
     
     Serial.println("Scanning for .txt files...");
     
-    File root = SD.open("/");
+    File root = SD.open(BOOKS_FOLDER);
     if (!root || !root.isDirectory()) {
-        Serial.println("Failed to open root directory");
+        Serial.printf("Failed to open %s directory\n", BOOKS_FOLDER);
         return;
     }
     
@@ -428,8 +522,10 @@ void listTextFiles() {
     while (file) {
         if (!file.isDirectory()) {
             String filename = String(file.name());
-            if (filename.startsWith("/")) {
-                filename = filename.substring(1);
+            // Extract just the filename (strip any path prefix)
+            int lastSlash = filename.lastIndexOf('/');
+            if (lastSlash >= 0) {
+                filename = filename.substring(lastSlash + 1);
             }
             
             // Skip macOS hidden files (._* and .DS_Store etc)
@@ -492,7 +588,7 @@ bool loadIndexFromSD(const String& filename, FileCache& cache) {
     }
     
     // Verify file size matches (if file changed, index is invalid)
-    String fullPath = "/" + filename;
+    String fullPath = String(BOOKS_FOLDER) + "/" + filename;
     File txtFile = SD.open(fullPath.c_str(), FILE_READ);
     if (!txtFile) {
         idxFile.close();
@@ -627,7 +723,7 @@ void preIndexFiles() {
         // No cached index - build it
         Serial.printf("  %s: building index...\n", fileList[f].c_str());
         
-        String fullPath = "/" + fileList[f];
+        String fullPath = String(BOOKS_FOLDER) + "/" + fileList[f];
         File file = SD.open(fullPath.c_str(), FILE_READ);
         
         if (!file) {
@@ -641,9 +737,9 @@ void preIndexFiles() {
         cache.lastReadPage = 0;  // Start at beginning for new files
         cache.pagePositions.push_back(0);  // First page always at 0
         
-        // Index using word-wrap logic that matches the display
-        int pagesFound = indexPagesWordWrap(file, 0, cache.pagePositions, PREINDEX_PAGES - 1);
-        int pageCount = 1 + pagesFound;
+        // Index using word-wrap aware logic (matches display rendering)
+        int pagesAdded = indexPagesWordWrap(file, 0, cache.pagePositions, PREINDEX_PAGES - 1);
+        int pageCount = 1 + pagesAdded;
         
         // Check if we indexed the whole file
         if (!file.available()) {
@@ -668,6 +764,9 @@ void preIndexFiles() {
 void displayFileList() {
     Serial.printf("Displaying file list, selectedFileIndex=%d\n", selectedFileIndex);
     
+    // Deselect SD card to free SPI bus for display
+    digitalWrite(SD_CS, HIGH);
+    
     display.setFullWindow();
     display.firstPage();
     do {
@@ -686,8 +785,9 @@ void displayFileList() {
             display.setCursor(10, 35);
             display.println("No .txt files found");
             display.println();
-            display.println("Add files to SD card");
-            display.println("and reset device");
+            display.println("Add .txt files to the");
+            display.printf("%s folder\n", BOOKS_FOLDER);
+            display.println("on SD card and reset");
         } else {
             int maxVisible = 12;
             int startIdx = max(0, min(selectedFileIndex - 5, (int)fileList.size() - maxVisible));
@@ -740,7 +840,7 @@ void displayFileList() {
             
             display.drawFastHLine(0, SCREEN_HEIGHT - 12, SCREEN_WIDTH, GxEPD_BLACK);
             display.setCursor(5, SCREEN_HEIGHT - 8);
-            display.print("ENTER=Open  W/S=Navigate");
+            display.print("ENT=Open W/S=Nav L=Light");
         }
     } while (display.nextPage());
     
@@ -767,11 +867,12 @@ void openBook(const String& filename) {
         }
     }
     
-    String fullPath = "/" + filename;
+    String fullPath = String(BOOKS_FOLDER) + "/" + filename;
     reader.file = SD.open(fullPath.c_str(), FILE_READ);
     
     if (!reader.file) {
         Serial.println("Failed to open file!");
+        digitalWrite(SD_CS, HIGH);
         display.setFullWindow();
         display.firstPage();
         do {
@@ -824,19 +925,18 @@ void openBook(const String& filename) {
         Serial.println("Continuing indexing from cache...");
         showIndexingScreen(filename);
         
-        // Seek to end of cached portion
+        // Continue indexing from last cached position using word-wrap logic
         long lastCachedPos = cache->pagePositions.back();
-        reader.file.seek(lastCachedPos);
+        indexPagesWordWrap(reader.file, lastCachedPos, reader.pagePositions, 0);
     } else {
         // No cache - show loading and index from scratch
         Serial.println("No cache - indexing from start...");
         showIndexingScreen(filename);
         reader.pagePositions.push_back(0);
+        
+        // Index entire file using word-wrap logic
+        indexPagesWordWrap(reader.file, 0, reader.pagePositions, 0);
     }
-    
-    // Continue/complete indexing using word-wrap logic that matches the display
-    long indexFrom = reader.pagePositions.back();
-    indexPagesWordWrap(reader.file, indexFrom, reader.pagePositions, -1);
     
     reader.totalPages = reader.pagePositions.size();
     Serial.printf("Total pages: %d\n", reader.totalPages);
@@ -945,52 +1045,65 @@ WrapResult findLineBreak(const char* buffer, int bufLen, int lineStart, int maxC
 
 // ============================================================================
 // WORD-WRAP AWARE PAGE INDEXER
-// ============================================================================
-// Uses the same findLineBreak logic as the display so page boundaries match exactly.
+// Uses the same findLineBreak logic as the display so pages match exactly.
 // Reads raw bytes so buffer positions map 1:1 to file offsets.
-// maxPages <= 0 means unlimited. Returns number of new pages found.
+// ============================================================================
 
 int indexPagesWordWrap(File& file, long startPos, std::vector<long>& pagePositions, int maxPages) {
-    const int LINES_PER_PAGE = settings.linesPerPage;
-    const int CHARS_PER_LINE = settings.charsPerLine;
-    const int BUF_SIZE = 2048;  // ~2x a full page, plenty of margin
+    const int CHARS_PER_LINE = 38;
+    const int LINES_PER_PAGE = 25;
+    const int BUF_SIZE = 2048;
     char buffer[BUF_SIZE];
-    
+
     file.seek(startPos);
-    int pagesFound = 0;
-    
-    while (file.available() && (maxPages <= 0 || pagesFound < maxPages)) {
-        long chunkStart = file.position();
-        
-        // Read raw bytes - no filtering, so buffer[i] == file byte at chunkStart+i
-        int bufLen = file.readBytes(buffer, BUF_SIZE);
+    int pagesAdded = 0;
+    int lineCount = 0;
+
+    // We read overlapping chunks: after processing a chunk we may have
+    // a partial line at the end.  We keep that remainder and prepend it
+    // to the next read.
+    int leftover = 0;
+    long chunkFileStart = startPos;  // file offset corresponding to buffer[0]
+
+    while (file.available() && (maxPages <= 0 || pagesAdded < maxPages)) {
+        // Read next chunk (after any leftover bytes already in buffer)
+        int bytesRead = file.readBytes(buffer + leftover, BUF_SIZE - leftover);
+        int bufLen = leftover + bytesRead;
         if (bufLen == 0) break;
-        
-        int lineCount = 0;
+
         int pos = 0;
-        
-        while (pos < bufLen && lineCount < LINES_PER_PAGE) {
+        while (pos < bufLen) {
             WrapResult wrap = findLineBreak(buffer, bufLen, pos, CHARS_PER_LINE);
+
+            // If findLineBreak couldn't make progress we need more data
+            if (wrap.nextStart <= pos && wrap.lineEnd >= bufLen) break;
+
             lineCount++;
-            
-            if (wrap.nextStart <= pos) break;  // Safety: no progress
             pos = wrap.nextStart;
+
+            if (lineCount >= LINES_PER_PAGE) {
+                long pageFilePos = chunkFileStart + pos;
+                pagePositions.push_back(pageFilePos);
+                pagesAdded++;
+                lineCount = 0;
+
+                if (maxPages > 0 && pagesAdded >= maxPages) break;
+            }
+
             if (pos >= bufLen) break;
         }
-        
-        if (lineCount >= LINES_PER_PAGE && pos <= bufLen) {
-            // Found a full page boundary
-            long nextPagePos = chunkStart + pos;
-            pagePositions.push_back(nextPagePos);
-            file.seek(nextPagePos);
-            pagesFound++;
+
+        // Keep unprocessed bytes for next iteration
+        leftover = bufLen - pos;
+        if (leftover > 0 && leftover < BUF_SIZE) {
+            memmove(buffer, buffer + pos, leftover);
         } else {
-            // Didn't fill a page - must be end of file
-            break;
+            leftover = 0;
         }
+        chunkFileStart = file.position() - leftover;
     }
-    
-    return pagesFound;
+
+    return pagesAdded;
 }
 
 // ============================================================================
@@ -1000,6 +1113,9 @@ int indexPagesWordWrap(File& file, long startPos, std::vector<long>& pagePositio
 void updateStatusBar() {
     const int STATUS_BAR_HEIGHT = 14;
     int statusY = SCREEN_HEIGHT - STATUS_BAR_HEIGHT;
+    
+    // Deselect SD card to free SPI bus for display
+    digitalWrite(SD_CS, HIGH);
     
     // Use partial window for just the status bar area
     display.setPartialWindow(0, statusY, SCREEN_WIDTH, STATUS_BAR_HEIGHT);
@@ -1028,7 +1144,12 @@ void updateStatusBar() {
         
         // Controls hint
         display.setCursor(100, textY);
-        display.print("W:Prev S:Next");
+        if (blLevelIndex > 0) {
+            const char* labels[] = {"", "Lo", "Lo", "Med", "Hi", "Max"};
+            display.printf("L:%s", labels[blLevelIndex]);
+        } else {
+            display.print("L:Light");
+        }
         
         display.setCursor(195, textY);
         display.print("Q:Exit");
@@ -1058,17 +1179,17 @@ void displayPageFull() {
     Serial.printf("displayPageFull: page %d, pos %ld\n", reader.currentPage + 1, pagePos);
     
     // Read page content into buffer BEFORE display operations
-    // Read raw bytes so buffer positions match file offsets (same as indexer)
+    // Use readBytes so buffer positions match file offsets (same as indexer)
     const int BUF_SIZE = 2048;
     char buffer[BUF_SIZE];
-    int bytesToRead = BUF_SIZE - 1;
-    int remaining = reader.file.size() - reader.file.position();
-    if (bytesToRead > remaining) bytesToRead = remaining;
-    if (bytesToRead > MAX_LINES * CHARS_PER_LINE * 3) bytesToRead = MAX_LINES * CHARS_PER_LINE * 3;
+    int bytesToRead = min((int)(BUF_SIZE - 1), MAX_LINES * CHARS_PER_LINE * 3);
     int bufLen = reader.file.readBytes(buffer, bytesToRead);
     buffer[bufLen] = '\0';
     
-    Serial.printf("displayPageFull: read %d chars\n", bufLen);
+    Serial.printf("displayPageFull: read %d bytes\n", bufLen);
+    
+    // Deselect SD card to free SPI bus for display
+    digitalWrite(SD_CS, HIGH);
     
     display.setFullWindow();
     display.firstPage();
@@ -1117,7 +1238,12 @@ void displayPageFull() {
         display.printf("%d%%", percent);
         
         display.setCursor(100, statusY);
-        display.print("W:Prev S:Next");
+        if (blLevelIndex > 0) {
+            const char* labels[] = {"", "Lo", "Lo", "Med", "Hi", "Max"};
+            display.printf("L:%s", labels[blLevelIndex]);
+        } else {
+            display.print("L:Light");
+        }
         
         display.setCursor(195, statusY);
         display.print("Q:Exit");
@@ -1302,6 +1428,10 @@ void handleKeyPress(uint8_t key) {
                     openBook(fileList[selectedFileIndex]);
                 }
                 break;
+                
+            case 'l':
+                cycleFrontLight();
+                break;
         }
     } else {
         // READING MODE
@@ -1325,6 +1455,10 @@ void handleKeyPress(uint8_t key) {
                 closeBook();
                 delay(50);  // Small delay before redrawing
                 displayFileList();
+                break;
+                
+            case 'l':
+                cycleFrontLight();
                 break;
         }
     }
