@@ -300,8 +300,7 @@ void initDisplay() {
     
     // Initialize display
     display.init(115200, true, 2, false);
-    display.setRotation(2);
-    display.mirror(true);
+    display.setRotation(0);
     display.setTextColor(GxEPD_BLACK);
     display.setTextSize(1);
     
@@ -840,7 +839,7 @@ void displayFileList() {
             
             display.drawFastHLine(0, SCREEN_HEIGHT - 12, SCREEN_WIDTH, GxEPD_BLACK);
             display.setCursor(5, SCREEN_HEIGHT - 8);
-            display.print("ENT=Open W/S=Nav L=Light");
+            display.print("ENTER=Open  W/S=Navigate");
         }
     } while (display.nextPage());
     
@@ -1144,12 +1143,7 @@ void updateStatusBar() {
         
         // Controls hint
         display.setCursor(100, textY);
-        if (blLevelIndex > 0) {
-            const char* labels[] = {"", "Lo", "Lo", "Med", "Hi", "Max"};
-            display.printf("L:%s", labels[blLevelIndex]);
-        } else {
-            display.print("L:Light");
-        }
+        display.print("W:Prev S:Next");
         
         display.setCursor(195, textY);
         display.print("Q:Exit");
@@ -1238,12 +1232,7 @@ void displayPageFull() {
         display.printf("%d%%", percent);
         
         display.setCursor(100, statusY);
-        if (blLevelIndex > 0) {
-            const char* labels[] = {"", "Lo", "Lo", "Med", "Hi", "Max"};
-            display.printf("L:%s", labels[blLevelIndex]);
-        } else {
-            display.print("L:Light");
-        }
+        display.print("W:Prev S:Next");
         
         display.setCursor(195, statusY);
         display.print("Q:Exit");
