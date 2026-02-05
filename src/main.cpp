@@ -68,7 +68,7 @@ GxEPD2_BW<GxEPD2_310_GDEQ031T10, GxEPD2_310_GDEQ031T10::HEIGHT> display(
 // ============================================================================
 
 // Version info
-#define VERSION "1.1.0"
+#define VERSION "0.0.2"
 #define BUILD_DATE "Feb 2026"
 
 // Index file version - increment when format changes
