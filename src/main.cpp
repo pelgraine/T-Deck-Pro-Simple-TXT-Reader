@@ -68,11 +68,11 @@ GxEPD2_BW<GxEPD2_310_GDEQ031T10, GxEPD2_310_GDEQ031T10::HEIGHT> display(
 // ============================================================================
 
 // Version info
-#define VERSION "0.0.3"
+#define VERSION "0.0.4"
 #define BUILD_DATE "Feb 2026"
 
 // Index file version - increment when format changes
-#define INDEX_VERSION 2
+#define INDEX_VERSION 3
 
 struct Settings {
     uint8_t textSize;
@@ -142,6 +142,7 @@ struct WrapResult {
     int nextStart;    // Start position for next line
 };
 WrapResult findLineBreak(const char* buffer, int bufLen, int lineStart, int maxChars);
+int indexPagesWordWrap(File& file, long startPos, std::vector<long>& pagePositions, int maxPages);
 
 // ============================================================================
 // SETUP
@@ -210,7 +211,7 @@ void initHardware() {
     digitalWrite(EPD_RST, HIGH);
     delay(10);
     
-    Serial.println("âœ“ Power enabled");
+    Serial.println("Ã¢Å“â€œ Power enabled");
 }
 
 void initDisplay() {
@@ -235,7 +236,7 @@ void initDisplay() {
         display.fillScreen(GxEPD_WHITE);
     } while (display.nextPage());
     
-    Serial.println("âœ“ Display initialized");
+    Serial.println("Ã¢Å“â€œ Display initialized");
 }
 
 void showSplashScreen() {
@@ -324,7 +325,7 @@ void initSD() {
     digitalWrite(SD_CS, HIGH);
     
     if (!SD.begin(SD_CS, displaySpi, 4000000)) {
-        Serial.println("âœ— SD Card failed!");
+        Serial.println("Ã¢Å“â€” SD Card failed!");
         
         display.setFullWindow();
         display.firstPage();
@@ -342,7 +343,7 @@ void initSD() {
     }
     
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    Serial.printf("âœ“ SD Card: %llu MB\n", cardSize);
+    Serial.printf("Ã¢Å“â€œ SD Card: %llu MB\n", cardSize);
 }
 
 void writeKBReg(uint8_t reg, uint8_t value) {
@@ -372,7 +373,7 @@ void initKeyboard() {
     uint8_t error = Wire.endTransmission();
     
     if (error != 0) {
-        Serial.printf("âœ— Keyboard not found (error: %d)\n", error);
+        Serial.printf("Ã¢Å“â€” Keyboard not found (error: %d)\n", error);
         return;
     }
     
@@ -405,7 +406,7 @@ void initKeyboard() {
     // Clear interrupt status again
     writeKBReg(TCA8418_REG_INT_STAT, 0x1F);  // Clear all interrupt flags
     
-    Serial.println("âœ“ Keyboard initialized");
+    Serial.println("Ã¢Å“â€œ Keyboard initialized");
 }
 
 // ============================================================================
@@ -640,38 +641,9 @@ void preIndexFiles() {
         cache.lastReadPage = 0;  // Start at beginning for new files
         cache.pagePositions.push_back(0);  // First page always at 0
         
-        int lineCount = 0;
-        int charCount = 0;
-        int pageCount = 1;
-        
-        // Index the first PREINDEX_PAGES pages
-        while (file.available() && pageCount < PREINDEX_PAGES) {
-            char c = file.read();
-            
-            if (c == '\n') {
-                lineCount++;
-                charCount = 0;
-                
-                if (lineCount >= settings.linesPerPage) {
-                    cache.pagePositions.push_back(file.position());
-                    lineCount = 0;
-                    pageCount++;
-                }
-            } else if (c >= 32 || c == '\t') {
-                charCount++;
-                
-                if (charCount >= settings.charsPerLine) {
-                    charCount = 0;
-                    lineCount++;
-                    
-                    if (lineCount >= settings.linesPerPage) {
-                        cache.pagePositions.push_back(file.position());
-                        lineCount = 0;
-                        pageCount++;
-                    }
-                }
-            }
-        }
+        // Index using word-wrap logic that matches the display
+        int pagesFound = indexPagesWordWrap(file, 0, cache.pagePositions, PREINDEX_PAGES - 1);
+        int pageCount = 1 + pagesFound;
         
         // Check if we indexed the whole file
         if (!file.available()) {
@@ -862,45 +834,9 @@ void openBook(const String& filename) {
         reader.pagePositions.push_back(0);
     }
     
-    // Continue/complete indexing
-    int lineCount = 0;
-    int charCount = 0;
-    unsigned long fileSize = reader.file.size();
-    unsigned long lastProgress = 0;
-    
-    while (reader.file.available()) {
-        char c = reader.file.read();
-        
-        // Print progress every 10%
-        unsigned long pos = reader.file.position();
-        unsigned long progress = (pos * 100) / fileSize;
-        if (progress >= lastProgress + 10) {
-            Serial.printf("  Indexing: %lu%%\n", progress);
-            lastProgress = progress;
-        }
-        
-        if (c == '\n') {
-            lineCount++;
-            charCount = 0;
-            
-            if (lineCount >= settings.linesPerPage) {
-                reader.pagePositions.push_back(reader.file.position());
-                lineCount = 0;
-            }
-        } else if (c >= 32 || c == '\t') {
-            charCount++;
-            
-            if (charCount >= settings.charsPerLine) {
-                charCount = 0;
-                lineCount++;
-                
-                if (lineCount >= settings.linesPerPage) {
-                    reader.pagePositions.push_back(reader.file.position());
-                    lineCount = 0;
-                }
-            }
-        }
-    }
+    // Continue/complete indexing using word-wrap logic that matches the display
+    long indexFrom = reader.pagePositions.back();
+    indexPagesWordWrap(reader.file, indexFrom, reader.pagePositions, -1);
     
     reader.totalPages = reader.pagePositions.size();
     Serial.printf("Total pages: %d\n", reader.totalPages);
@@ -1008,6 +944,56 @@ WrapResult findLineBreak(const char* buffer, int bufLen, int lineStart, int maxC
 }
 
 // ============================================================================
+// WORD-WRAP AWARE PAGE INDEXER
+// ============================================================================
+// Uses the same findLineBreak logic as the display so page boundaries match exactly.
+// Reads raw bytes so buffer positions map 1:1 to file offsets.
+// maxPages <= 0 means unlimited. Returns number of new pages found.
+
+int indexPagesWordWrap(File& file, long startPos, std::vector<long>& pagePositions, int maxPages) {
+    const int LINES_PER_PAGE = settings.linesPerPage;
+    const int CHARS_PER_LINE = settings.charsPerLine;
+    const int BUF_SIZE = 2048;  // ~2x a full page, plenty of margin
+    char buffer[BUF_SIZE];
+    
+    file.seek(startPos);
+    int pagesFound = 0;
+    
+    while (file.available() && (maxPages <= 0 || pagesFound < maxPages)) {
+        long chunkStart = file.position();
+        
+        // Read raw bytes - no filtering, so buffer[i] == file byte at chunkStart+i
+        int bufLen = file.readBytes(buffer, BUF_SIZE);
+        if (bufLen == 0) break;
+        
+        int lineCount = 0;
+        int pos = 0;
+        
+        while (pos < bufLen && lineCount < LINES_PER_PAGE) {
+            WrapResult wrap = findLineBreak(buffer, bufLen, pos, CHARS_PER_LINE);
+            lineCount++;
+            
+            if (wrap.nextStart <= pos) break;  // Safety: no progress
+            pos = wrap.nextStart;
+            if (pos >= bufLen) break;
+        }
+        
+        if (lineCount >= LINES_PER_PAGE && pos <= bufLen) {
+            // Found a full page boundary
+            long nextPagePos = chunkStart + pos;
+            pagePositions.push_back(nextPagePos);
+            file.seek(nextPagePos);
+            pagesFound++;
+        } else {
+            // Didn't fill a page - must be end of file
+            break;
+        }
+    }
+    
+    return pagesFound;
+}
+
+// ============================================================================
 // PARTIAL SCREEN REFRESH FOR STATUS BAR
 // ============================================================================
 
@@ -1072,18 +1058,14 @@ void displayPageFull() {
     Serial.printf("displayPageFull: page %d, pos %ld\n", reader.currentPage + 1, pagePos);
     
     // Read page content into buffer BEFORE display operations
-    const int BUF_SIZE = 1200;
+    // Read raw bytes so buffer positions match file offsets (same as indexer)
+    const int BUF_SIZE = 2048;
     char buffer[BUF_SIZE];
-    int bufLen = 0;
-    
-    while (reader.file.available() && bufLen < BUF_SIZE - 1) {
-        char c = reader.file.read();
-        if (c >= 32 || c == '\n' || c == '\r') {
-            buffer[bufLen++] = c;
-        }
-        // Stop if we've read enough for a page
-        if (bufLen > MAX_LINES * CHARS_PER_LINE * 2) break;
-    }
+    int bytesToRead = BUF_SIZE - 1;
+    int remaining = reader.file.size() - reader.file.position();
+    if (bytesToRead > remaining) bytesToRead = remaining;
+    if (bytesToRead > MAX_LINES * CHARS_PER_LINE * 3) bytesToRead = MAX_LINES * CHARS_PER_LINE * 3;
+    int bufLen = reader.file.readBytes(buffer, bytesToRead);
     buffer[bufLen] = '\0';
     
     Serial.printf("displayPageFull: read %d chars\n", bufLen);
