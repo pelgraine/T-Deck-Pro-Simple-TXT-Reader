@@ -358,7 +358,7 @@ void initSD() {
         int cx = 300, cy = 250;
         epd_write_string(&FiraSans_20, "SD CARD ERROR", &cx, &cy, fb, &props);
         cx = 300; cy = 290;
-        epd_write_string(&FiraSans_16, "Insert card and reset device", &cx, &cy, fb, &props);
+        epd_write_string(&Firasans_12, "Insert card and reset device", &cx, &cy, fb, &props);
         updateScreen(true);
         
         while (1) delay(1000);
@@ -447,22 +447,22 @@ void showSplashScreen() {
     cy = SCREEN_HEIGHT / 2;
     char versionStr[64];
     snprintf(versionStr, sizeof(versionStr), "v%s", VERSION);
-    epd_write_string(&FiraSans_16, versionStr, &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, versionStr, &cx, &cy, fb, &props);
     
     // Build date
     cx = SCREEN_WIDTH / 2;
     cy = SCREEN_HEIGHT / 2 + 30;
-    epd_write_string(&FiraSans_16, BUILD_DATE, &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, BUILD_DATE, &cx, &cy, fb, &props);
     
     // Platform info
     cx = SCREEN_WIDTH / 2;
     cy = SCREEN_HEIGHT / 2 + 70;
-    epd_write_string(&FiraSans_16, "LilyGo T5S3 Pro - 4.7\" E-Paper", &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, "LilyGo T5S3 Pro - 4.7\" E-Paper", &cx, &cy, fb, &props);
     
     // Loading
     cx = SCREEN_WIDTH / 2;
     cy = SCREEN_HEIGHT / 2 + 110;
-    epd_write_string(&FiraSans_16, "Loading...", &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, "Loading...", &cx, &cy, fb, &props);
     
     updateScreen(true);
     delay(1500);
@@ -478,10 +478,10 @@ void showIndexingScreen(const String& filename) {
     epd_write_string(&FiraSans_20, "Indexing Pages...", &cx, &cy, fb, &props);
     
     cx = 60; cy = 150;
-    epd_write_string(&FiraSans_16, filename.c_str(), &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, filename.c_str(), &cx, &cy, fb, &props);
     
     cx = 60; cy = 200;
-    epd_write_string(&FiraSans_16, "Please wait...", &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, "Please wait...", &cx, &cy, fb, &props);
     
     updateScreen(true);
 }
@@ -764,9 +764,9 @@ void displayFileList() {
     
     if (fileList.size() == 0) {
         cx = 30; cy = 90;
-        epd_write_string(&FiraSans_16, "No .txt files found", &cx, &cy, fb, &props);
+        epd_write_string(&Firasans_12, "No .txt files found", &cx, &cy, fb, &props);
         cx = 30; cy = 120;
-        epd_write_string(&FiraSans_16, "Add files to SD card and reset device", &cx, &cy, fb, &props);
+        epd_write_string(&Firasans_12, "Add files to SD card and reset device", &cx, &cy, fb, &props);
     } else {
         int maxVisible = 16;  // More items visible on the larger screen
         int startIdx = max(0, min(selectedFileIndex - 7, (int)fileList.size() - maxVisible));
@@ -812,9 +812,9 @@ void displayFileList() {
             int textY = y + 16;
             
             if (isSelected) {
-                epd_write_string(&FiraSans_16, displayName.c_str(), &cx, &textY, fb, &invertedProps);
+                epd_write_string(&Firasans_12, displayName.c_str(), &cx, &textY, fb, &invertedProps);
             } else {
-                epd_write_string(&FiraSans_16, displayName.c_str(), &cx, &textY, fb, &props);
+                epd_write_string(&Firasans_12, displayName.c_str(), &cx, &textY, fb, &props);
             }
             
             y += lineHeight;
@@ -824,12 +824,12 @@ void displayFileList() {
         char countStr[32];
         snprintf(countStr, sizeof(countStr), "%d/%d files", selectedFileIndex + 1, (int)fileList.size());
         cx = 20; cy = SCREEN_HEIGHT - 40;
-        epd_write_string(&FiraSans_16, countStr, &cx, &cy, fb, &props);
+        epd_write_string(&Firasans_12, countStr, &cx, &cy, fb, &props);
         
         // Navigation hints
         drawHLine(0, SCREEN_HEIGHT - 25, SCREEN_WIDTH, 0);
         cx = 20; cy = SCREEN_HEIGHT - 8;
-        epd_write_string(&FiraSans_16, "Tap item to open  |  Swipe up/down to scroll", &cx, &cy, fb, &props);
+        epd_write_string(&Firasans_12, "Tap item to open  |  Swipe up/down to scroll", &cx, &cy, fb, &props);
     }
     
     updateScreen(true);
@@ -1098,7 +1098,7 @@ void displayPageFull() {
             
             int cx = settings.marginX;
             int cy = y;
-            epd_write_string(&FiraSans_16, lineBuf, &cx, &cy, fb, &props);
+            epd_write_string(&Firasans_12, lineBuf, &cx, &cy, fb, &props);
         }
         
         y += settings.lineHeight;
@@ -1117,7 +1117,7 @@ void displayPageFull() {
     snprintf(statusLeft, sizeof(statusLeft), "Page %d / %d", reader.currentPage + 1, reader.totalPages);
     int cx = 20;
     int cy = statusY + 22;
-    epd_write_string(&FiraSans_16, statusLeft, &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, statusLeft, &cx, &cy, fb, &props);
     
     int percent = reader.totalPages > 1 ? 
         (reader.currentPage * 100) / (reader.totalPages - 1) : 100;
@@ -1125,12 +1125,12 @@ void displayPageFull() {
     snprintf(statusMid, sizeof(statusMid), "%d%%", percent);
     cx = SCREEN_WIDTH / 2 - 30;
     cy = statusY + 22;
-    epd_write_string(&FiraSans_16, statusMid, &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, statusMid, &cx, &cy, fb, &props);
     
     // Navigation hints
     cx = SCREEN_WIDTH - 350;
     cy = statusY + 22;
-    epd_write_string(&FiraSans_16, "< Prev  |  Next >  |  Back", &cx, &cy, fb, &props);
+    epd_write_string(&Firasans_12, "< Prev  |  Next >  |  Back", &cx, &cy, fb, &props);
     
     updateScreen(true);
     
