@@ -93,8 +93,8 @@ uint8_t* fb = NULL;
 // For now, we declare an extern font. You MUST provide a font header.
 // The LilyGo examples include fonts in their data/ directory.
 // See the "Generating Fonts" section in the README.
-extern const EpdFont FiraSans_16;   // ~16pt for body text
-extern const EpdFont FiraSans_20;   // ~20pt for headers/UI
+#include "fonts/firasans_12.h"
+#include "fonts/firasans_20.h"
 
 // If you don't have the font headers yet, uncomment this to use a fallback:
 // #define USE_BUILTIN_FONT 1
