@@ -26,7 +26,7 @@
 #include <epdiy.h>
 
 // For touch input (GT911)
-#include <TouchDrvGT911.h>
+#include <TouchDrvGT911.hpp>
 
 // ============================================================================
 // T5S3 PRO (H752-01) HARDWARE DEFINITIONS
