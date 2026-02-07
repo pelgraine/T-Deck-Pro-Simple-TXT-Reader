@@ -1,7 +1,8 @@
-## T-Deck Pro Simple TXT Reader
-A simple e-book reader firmware for the LilyGo T-Deck Pro, designed to read plain text (.txt) files from an SD card on the built-in e-paper display.
+## Firmware Now Redundant
 
-**★★ Please note that the firmware currently a work-in-progress and very much in Alpha status. Feel free to download/build/amend/fork as you wish ★★**
+
+**★★ Please note this repo is not actively being worked on as it has been folded into the Meck firmware txt-reader branch   ★★**
+
 
 ## Features
 
